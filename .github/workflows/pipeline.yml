@@ -168,62 +168,35 @@ jobs:
           docker buildx build --load -t worker:scan ./worker
           docker buildx build --load -t frontend:scan ./frontend
 
-      - name: Debug scan API image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: api:scan
-          format: table
-          severity: CRITICAL
-          exit-code: "0"
-          ignore-unfixed: true
+      - name: Install Trivy
+        run: |
+          wget -qO- https://github.com/aquasecurity/trivy/releases/download/v0.69.3/trivy_0.69.3_Linux-64bit.tar.gz \
+            | tar -xz trivy
+          sudo mv trivy /usr/local/bin/
 
       - name: Scan API image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: api:scan
-          format: sarif
-          output: trivy-api.sarif
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
-
-      - name: Debug scan worker image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: worker:scan
-          format: table
-          severity: CRITICAL
-          exit-code: "0"
-          ignore-unfixed: true
+        run: |
+          trivy image --exit-code 1 --severity CRITICAL \
+            --ignore-unfixed --format table api:scan
+          trivy image --exit-code 0 --severity CRITICAL \
+            --ignore-unfixed --format sarif \
+            --output trivy-api.sarif api:scan
 
       - name: Scan worker image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: worker:scan
-          format: sarif
-          output: trivy-worker.sarif
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
-
-      - name: Debug scan frontend image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: frontend:scan
-          format: table
-          severity: CRITICAL
-          exit-code: "0"
-          ignore-unfixed: true
+        run: |
+          trivy image --exit-code 1 --severity CRITICAL \
+            --ignore-unfixed --format table worker:scan
+          trivy image --exit-code 0 --severity CRITICAL \
+            --ignore-unfixed --format sarif \
+            --output trivy-worker.sarif worker:scan
 
       - name: Scan frontend image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: frontend:scan
-          format: sarif
-          output: trivy-frontend.sarif
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
+        run: |
+          trivy image --exit-code 1 --severity CRITICAL \
+            --ignore-unfixed --format table frontend:scan
+          trivy image --exit-code 0 --severity CRITICAL \
+            --ignore-unfixed --format sarif \
+            --output trivy-frontend.sarif frontend:scan
 
       - name: Upload Trivy SARIF results
         uses: actions/upload-artifact@v4
