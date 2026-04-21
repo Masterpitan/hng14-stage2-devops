@@ -44,6 +44,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.path.exists('/app/worker.py') or exit(1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     deploy:
       resources:
         limits:

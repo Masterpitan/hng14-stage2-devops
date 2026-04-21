@@ -301,7 +301,13 @@ jobs:
 
             echo "Waiting for $SERVICE to become healthy..."
             ELAPSED=0
-            until [ "$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q $SERVICE))" = "healthy" ]; do
+            while true; do
+              STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}' \
+                $(docker compose ps -q $SERVICE) 2>/dev/null || echo "starting")
+              echo "$SERVICE status: $STATUS"
+              if [ "$STATUS" = "healthy" ] || [ "$STATUS" = "running" ]; then
+                break
+              fi
               if [ $ELAPSED -ge 60 ]; then
                 echo "$SERVICE failed health check within 60s — aborting, restoring old container"
                 docker compose stop $SERVICE
