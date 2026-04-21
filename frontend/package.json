@@ -3,10 +3,16 @@
   "version": "1.0.0",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "lint": "eslint app.js"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.4.0"
+    "axios": "^1.4.0",
+    "csurf": "^1.11.0",
+    "cookie-parser": "^1.4.6"
   }
 }

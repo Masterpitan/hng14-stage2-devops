@@ -1,0 +1,311 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  REGISTRY: localhost:5000
+
+jobs:
+  # ============================================================
+  # STAGE 1: LINT
+  # ============================================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint Python (api)
+        run: flake8 api/main.py --max-line-length=100
+
+      - name: Lint Python (worker)
+        run: flake8 worker/worker.py --max-line-length=100
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install frontend dependencies
+        run: npm install
+        working-directory: frontend
+
+      - name: Lint JavaScript
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Install hadolint
+        run: |
+          wget -qO /usr/local/bin/hadolint \
+            https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          chmod +x /usr/local/bin/hadolint
+
+      - name: Lint Dockerfiles
+        run: |
+          hadolint api/Dockerfile
+          hadolint worker/Dockerfile
+          hadolint frontend/Dockerfile
+
+  # ============================================================
+  # STAGE 2: TEST
+  # ============================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        working-directory: api
+
+      - name: Run tests with coverage
+        run: pytest tests/ -v --cov=main --cov-report=xml --cov-report=term-missing
+        working-directory: api
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: api/coverage.xml
+
+  # ============================================================
+  # STAGE 3: BUILD
+  # ============================================================
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/api:${{ github.sha }}
+            ${{ env.REGISTRY }}/api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./worker
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/worker:${{ github.sha }}
+            ${{ env.REGISTRY }}/worker:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/frontend:${{ github.sha }}
+            ${{ env.REGISTRY }}/frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================
+  # STAGE 4: SECURITY SCAN
+  # ============================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Rebuild images into local daemon for Trivy
+        run: |
+          docker buildx build --load -t api:scan ./api
+          docker buildx build --load -t worker:scan ./worker
+          docker buildx build --load -t frontend:scan ./frontend
+
+      - name: Scan API image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: api:scan
+          format: sarif
+          output: trivy-api.sarif
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Scan worker image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: worker:scan
+          format: sarif
+          output: trivy-worker.sarif
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: frontend:scan
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-sarif-results
+          path: "*.sarif"
+
+  # ============================================================
+  # STAGE 5: INTEGRATION TEST
+  # ============================================================
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: security-scan
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env file for integration test
+        run: |
+          echo "REDIS_HOST=redis" >> api/.env
+          echo "REDIS_PORT=6379" >> api/.env
+          echo "REDIS_PASSWORD=integrationtestpassword" >> api/.env
+          echo "APP_ENV=production" >> api/.env
+
+      - name: Bring stack up
+        run: |
+          REDIS_PASSWORD=integrationtestpassword docker compose up --build -d
+          echo "Waiting for all services to be healthy..."
+          timeout 120 bash -c \
+            'until [ "$(docker compose ps --format json | python3 -c "
+          import sys, json
+          services = [json.loads(l) for l in sys.stdin if l.strip()]
+          unhealthy = [s[\"Name\"] for s in services if s.get(\"Health\") not in (\"healthy\", \"\")]
+          print(len(unhealthy))
+          ")" = "0" ]; do sleep 5; done'
+
+      - name: Submit a job via frontend
+        id: submit
+        run: |
+          TOKEN=$(curl -sc /tmp/cookies http://localhost:3000/csrf-token | python3 -c "import sys,json; print(json.load(sys.stdin)['csrfToken'])")
+          JOB_ID=$(curl -sb /tmp/cookies -X POST http://localhost:3000/submit \
+            -H "CSRF-Token: $TOKEN" \
+            -H "Content-Type: application/json" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+
+      - name: Poll until job completes
+        run: |
+          JOB_ID="${{ steps.submit.outputs.job_id }}"
+          echo "Polling job $JOB_ID..."
+          for i in $(seq 1 15); do
+            STATUS=$(curl -s http://localhost:8000/jobs/$JOB_ID | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
+            echo "Attempt $i: status=$STATUS"
+            if [ "$STATUS" = "completed" ]; then
+              echo "Job completed successfully"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Job did not complete in time"
+          exit 1
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down -v
+
+  # ============================================================
+  # STAGE 6: DEPLOY
+  # ============================================================
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: integration-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy with rolling update
+        env:
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+        run: |
+          set -e
+
+          SERVICES="api worker frontend"
+
+          for SERVICE in $SERVICES; do
+            echo "Rolling update: $SERVICE"
+
+            OLD_CONTAINER=$(docker compose ps -q $SERVICE 2>/dev/null || true)
+
+            docker compose up -d --no-deps --build $SERVICE
+
+            echo "Waiting for $SERVICE to become healthy..."
+            ELAPSED=0
+            until [ "$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q $SERVICE))" = "healthy" ]; do
+              if [ $ELAPSED -ge 60 ]; then
+                echo "$SERVICE failed health check within 60s — aborting, restoring old container"
+                docker compose stop $SERVICE
+                if [ -n "$OLD_CONTAINER" ]; then
+                  docker start $OLD_CONTAINER
+                fi
+                exit 1
+              fi
+              sleep 5
+              ELAPSED=$((ELAPSED + 5))
+            done
+
+            if [ -n "$OLD_CONTAINER" ]; then
+              docker stop $OLD_CONTAINER || true
+            fi
+
+            echo "$SERVICE updated successfully"
+          done
