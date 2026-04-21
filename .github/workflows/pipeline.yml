@@ -226,14 +226,21 @@ jobs:
       - name: Bring stack up
         run: |
           REDIS_PASSWORD=integrationtestpassword docker compose up --build -d
-          echo "Waiting for all services to be healthy..."
-          timeout 120 bash -c \
-            'until [ "$(docker compose ps --format json | python3 -c "
-          import sys, json
-          services = [json.loads(l) for l in sys.stdin if l.strip()]
-          unhealthy = [s[\"Name\"] for s in services if s.get(\"Health\") not in (\"healthy\", \"\")]
-          print(len(unhealthy))
-          ")" = "0" ]; do sleep 5; done'
+          echo "Waiting for services to be healthy..."
+          for i in $(seq 1 24); do
+            sleep 5
+            UNHEALTHY=$(docker compose ps | grep -c "starting\|unhealthy" || true)
+            echo "Attempt $i: unhealthy/starting=$UNHEALTHY"
+            if [ "$UNHEALTHY" -eq 0 ]; then
+              echo "All services healthy"
+              break
+            fi
+            if [ "$i" -eq 24 ]; then
+              echo "Services did not become healthy in time"
+              docker compose logs
+              exit 1
+            fi
+          done
 
       - name: Submit a job via frontend
         id: submit
@@ -249,8 +256,9 @@ jobs:
           JOB_ID="${{ steps.submit.outputs.job_id }}"
           echo "Polling job $JOB_ID..."
           for i in $(seq 1 15); do
-            STATUS=$(curl -s http://localhost:8000/jobs/$JOB_ID | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
-            echo "Attempt $i: status=$STATUS"
+            RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
+            echo "Attempt $i: $RESPONSE"
+            STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
             if [ "$STATUS" = "completed" ]; then
               echo "Job completed successfully"
               exit 0
