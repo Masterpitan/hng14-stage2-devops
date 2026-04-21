@@ -1,7 +1,4 @@
-fastapi
-uvicorn
-redis
-python-dotenv
-pytest
-httpx
-pytest-cov
+fastapi==0.115.12
+uvicorn==0.34.0
+redis==5.0.1
+python-dotenv==1.0.0
